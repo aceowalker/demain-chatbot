@@ -1,3 +1,4 @@
+import os
 import base64
 import streamlit as st
 from dotenv import load_dotenv
@@ -7,6 +8,10 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 
 load_dotenv()
+
+# Streamlit Cloud の secrets から APIキーを取得（ローカルは .env を優先）
+if "OPENAI_API_KEY" in st.secrets:
+    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
 st.set_page_config(page_title="石窯パン工房 Demain チャットボット", page_icon="🍞")
 
@@ -73,8 +78,24 @@ div.stButton > button:hover {{
 """, unsafe_allow_html=True)
 
 
+def build_vectorstore_if_needed():
+    if not os.path.exists("chroma_db"):
+        from langchain_community.document_loaders import TextLoader
+        from langchain.text_splitter import MarkdownHeaderTextSplitter
+        headers = [("#", "H1"), ("##", "H2"), ("###", "H3")]
+        splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers)
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        chunks = []
+        for fname in ["knowledge/products.md", "knowledge/store_info.md", "knowledge/allergens.md"]:
+            docs = TextLoader(fname, encoding="utf-8").load()
+            for doc in docs:
+                chunks.extend(splitter.split_text(doc.page_content))
+        Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory="chroma_db")
+
+
 @st.cache_resource
 def load_chain():
+    build_vectorstore_if_needed()
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     vectorstore = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
     retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
