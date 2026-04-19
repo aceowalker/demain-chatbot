@@ -25,6 +25,7 @@ bg_image = get_base64_image("assets/rogo002.jpg")
 
 st.markdown(f"""
 <style>
+/* 背景画像 */
 html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {{
     background-image: url("data:image/jpeg;base64,{bg_image}");
     background-size: cover;
@@ -34,15 +35,28 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {{
 [data-testid="stHeader"] {{
     background: transparent;
 }}
-#chat-wrap {{
-    max-width: 680px;
-    margin: 0 auto;
-    background: rgba(255, 255, 255, 0.88);
+
+/* メインコンテナを半透明ウィンドウ化 */
+[data-testid="stMainBlockContainer"] {{
+    max-width: 720px;
+    margin: 40px auto;
+    background: rgba(255, 255, 255, 0.92) !important;
     border-radius: 20px;
-    padding: 32px;
+    padding: 32px 40px 40px 40px;
     box-shadow: 0 8px 40px rgba(0,0,0,0.35);
-    backdrop-filter: blur(6px);
+    backdrop-filter: blur(8px);
 }}
+
+/* チャットメッセージ背景を透明に */
+[data-testid="stChatMessage"] {{
+    background: transparent !important;
+}}
+
+/* 入力欄 */
+[data-testid="stChatInput"] textarea {{
+    background: rgba(255,255,255,0.95) !important;
+}}
+
 #chat-title {{
     text-align: center;
     font-size: 1.6rem;
@@ -56,7 +70,7 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {{
     font-size: 0.85rem;
     color: #b07020;
     letter-spacing: 0.08em;
-    margin-bottom: 20px;
+    margin-bottom: 8px;
 }}
 div.stButton > button {{
     background-color: #E8890C;
@@ -71,10 +85,8 @@ div.stButton > button:hover {{
     color: white;
 }}
 </style>
-<div id="chat-wrap">
-  <div id="chat-title">石窯パン工房 Demain</div>
-  <div id="chat-subtitle">ご質問はこちらからどうぞ｜What can I help you with?</div>
-</div>
+<div id="chat-title">石窯パン工房 Demain</div>
+<div id="chat-subtitle">ご質問はこちらからどうぞ｜What can I help you with?</div>
 """, unsafe_allow_html=True)
 
 
