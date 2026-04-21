@@ -45,16 +45,40 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {{
     padding: 32px 40px 40px 40px;
     box-shadow: 0 8px 40px rgba(0,0,0,0.35);
     backdrop-filter: blur(8px);
+    color: #333333 !important;
 }}
 
-/* チャットメッセージ背景を透明に */
+/* チャットメッセージ背景を透明に・全テキストを強制的に暗色に */
 [data-testid="stChatMessage"] {{
     background: transparent !important;
+    color: #333333 !important;
+}}
+[data-testid="stChatMessage"] *,
+[data-testid="stChatMessage"] p,
+[data-testid="stChatMessage"] span,
+[data-testid="stChatMessage"] div,
+[data-testid="stMarkdownContainer"],
+[data-testid="stMarkdownContainer"] *,
+[data-testid="stMarkdownContainer"] p {{
+    color: #333333 !important;
+}}
+
+/* メインコンテナ内の全テキストを強制的に暗色に */
+[data-testid="stMainBlockContainer"] p,
+[data-testid="stMainBlockContainer"] span,
+[data-testid="stMainBlockContainer"] div,
+[data-testid="stMainBlockContainer"] label {{
+    color: #333333 !important;
 }}
 
 /* 入力欄 */
 [data-testid="stChatInput"] textarea {{
     background: rgba(255,255,255,0.95) !important;
+    color: #333333 !important;
+}}
+[data-testid="stChatInput"] textarea::placeholder {{
+    color: #888888 !important;
+    opacity: 1 !important;
 }}
 
 #chat-title {{
