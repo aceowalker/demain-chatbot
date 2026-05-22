@@ -1,15 +1,25 @@
 import os
+import re
 import base64
+from typing import Any, List
+
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_chroma import Chroma
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
+from langchain_core.retrievers import BaseRetriever
+from langchain_core.callbacks.manager import CallbackManagerForRetrieverRun
+from langchain_core.documents import Document
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_community.document_loaders import TextLoader
+from langchain.text_splitter import MarkdownHeaderTextSplitter
+from rank_bm25 import BM25Okapi
+from pydantic import Field
 
 load_dotenv()
 
-# Streamlit Cloud の secrets から APIキーを取得（ローカルは .env を優先）
 if "OPENAI_API_KEY" in st.secrets:
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
@@ -114,28 +124,148 @@ div.stButton > button:hover {{
 """, unsafe_allow_html=True)
 
 
-def build_vectorstore_if_needed():
-    if not os.path.exists("chroma_db"):
-        from langchain_community.document_loaders import TextLoader
-        from langchain.text_splitter import MarkdownHeaderTextSplitter
-        headers = [("#", "H1"), ("##", "H2"), ("###", "H3")]
-        splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers)
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-        chunks = []
-        for fname in ["knowledge/products.md", "knowledge/store_info.md", "knowledge/allergens.md"]:
-            docs = TextLoader(fname, encoding="utf-8").load()
-            for doc in docs:
-                chunks.extend(splitter.split_text(doc.page_content))
-        Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory="chroma_db")
+# ── クエリ書き換えプロンプト ──────────────────────────────────────────────────
+QUERY_REWRITE_PROMPT = """あなたはベーカリーの情報を検索するためのクエリ生成AIです。
+ユーザーの質問に対して、ナレッジベースから必要な情報を
+確実に取得するための検索クエリを3つ生成してください。
+
+【生成するクエリの方向】
+1. 元の質問の言い換え（別の表現で同じことを聞く）
+2. 質問の分解（複数の概念が含まれる場合、個別に分ける）
+3. 具体化（あいまいな表現を具体的な用語に変換する）
+
+【出力形式】
+クエリ1:（テキスト）
+クエリ2:（テキスト）
+クエリ3:（テキスト）
+
+それ以外の文章は一切出力しないこと。"""
 
 
+# ── 日本語トークナイザー（bigram + unigram）────────────────────────────────
+def _tokenize(text: str) -> List[str]:
+    text = re.sub(r'[#*\-\|「」【】（）・\s]+', '', text)
+    if not text:
+        return ['']
+    tokens: List[str] = []
+    for i in range(len(text)):
+        tokens.append(text[i])
+        if i < len(text) - 1:
+            tokens.append(text[i:i + 2])
+    return tokens
+
+
+# ── ハイブリッド検索 Retriever ────────────────────────────────────────────
+class HybridMultiQueryRetriever(BaseRetriever):
+    """クエリ書き換え + BM25 + ChromaDB + RRF 統合 Retriever"""
+
+    vectorstore: Any = Field(...)
+    documents: List[Any] = Field(...)
+    bm25: Any = Field(...)
+    llm: Any = Field(...)
+    k: int = Field(default=5)
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def _generate_queries(self, question: str) -> List[str]:
+        try:
+            response = self.llm.invoke([
+                SystemMessage(content=QUERY_REWRITE_PROMPT),
+                HumanMessage(content=question),
+            ])
+            queries: List[str] = []
+            for line in response.content.strip().split('\n'):
+                line = line.strip()
+                if re.match(r'^クエリ\d+[:：]', line):
+                    q = re.sub(r'^クエリ\d+[:：]\s*', '', line).strip('（）() ')
+                    if q:
+                        queries.append(q)
+            return queries[:3] if queries else [question]
+        except Exception:
+            return [question]
+
+    def _vector_search(self, query: str, k: int = 5) -> List[str]:
+        results = self.vectorstore.similarity_search(query, k=k)
+        return [doc.page_content for doc in results]
+
+    def _bm25_search(self, query: str, k: int = 5) -> List[str]:
+        tokens = _tokenize(query)
+        scores = self.bm25.get_scores(tokens)
+        top_k = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
+        return [self.documents[i].page_content for i in top_k]
+
+    def _rrf(self, rankings: List[List[str]], k_rrf: int = 60) -> List[str]:
+        scores: dict = {}
+        for ranking in rankings:
+            for rank, content in enumerate(ranking):
+                scores[content] = scores.get(content, 0.0) + 1.0 / (k_rrf + rank + 1)
+        return sorted(scores, key=lambda x: scores[x], reverse=True)[:self.k]
+
+    def _get_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: CallbackManagerForRetrieverRun,
+    ) -> List[Document]:
+        queries = self._generate_queries(query)
+
+        rankings: List[List[str]] = []
+        for q in queries:
+            rankings.append(self._vector_search(q, k=5))
+            rankings.append(self._bm25_search(q, k=5))
+
+        top_contents = self._rrf(rankings)
+
+        content_map = {doc.page_content: doc for doc in self.documents}
+        return [
+            content_map.get(c, Document(page_content=c))
+            for c in top_contents
+        ]
+
+
+# ── チャンク構築（BM25 / ベクトルDB 共通）────────────────────────────────
+def _build_chunks() -> List[Document]:
+    headers = [("#", "H1"), ("##", "H2"), ("###", "H3")]
+    splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers)
+    chunks: List[Document] = []
+    for fname in ["knowledge/products.md", "knowledge/store_info.md", "knowledge/allergens.md"]:
+        docs = TextLoader(fname, encoding="utf-8").load()
+        for doc in docs:
+            chunks.extend(splitter.split_text(doc.page_content))
+    return chunks
+
+
+# ── チェーン構築（キャッシュ）────────────────────────────────────────────
 @st.cache_resource
 def load_chain():
-    build_vectorstore_if_needed()
+    chunks = _build_chunks()
+
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-    vectorstore = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
+    if not os.path.exists("chroma_db"):
+        vectorstore = Chroma.from_documents(
+            documents=chunks,
+            embedding=embeddings,
+            persist_directory="chroma_db",
+        )
+    else:
+        vectorstore = Chroma(
+            persist_directory="chroma_db",
+            embedding_function=embeddings,
+        )
+
+    tokenized = [_tokenize(c.page_content) for c in chunks]
+    bm25 = BM25Okapi(tokenized)
+
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    retriever = HybridMultiQueryRetriever(
+        vectorstore=vectorstore,
+        documents=chunks,
+        bm25=bm25,
+        llm=llm,
+        k=5,
+    )
+
     memory = ConversationBufferMemory(
         memory_key="chat_history",
         return_messages=True,
@@ -149,6 +279,7 @@ def load_chain():
     )
 
 
+# ── Streamlit UI ──────────────────────────────────────────────────────────
 qa_chain = load_chain()
 
 if "history" not in st.session_state:
